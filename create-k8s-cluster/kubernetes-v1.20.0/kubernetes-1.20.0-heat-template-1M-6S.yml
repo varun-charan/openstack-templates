@@ -1,0 +1,667 @@
+heat_template_version: 2018-08-31
+description: A template used to create a kubernetes cluster of 1 control node and 6 compute nodes
+parameter_groups:
+  - label: General Parameters
+    description: General Parameters
+    parameters:
+      - cluster_token
+      - dashboard_token
+      - user_identifier
+      - sshkeypair
+
+  - label: Kubernetes-related Parameters
+    description: Kubernetes-related Parameters
+    parameters:
+      - image
+      - master_flavor
+      - flavor
+      - public_network
+      - tenant_network
+      
+parameters:
+    user_identifier:
+        type: string
+        label: An identifier that'll be used to create resources (for e.g., first name, feature name, etc.)
+        description: An identifier that'll be used to create resources (for e.g., first name, feature name, etc.)
+    image:
+        type: string
+        label: Image for all K8s nodes
+        description: K8s node(s) image
+        default: k8s-1.20-ol75
+        constraints:
+            - custom_constraint: glance.image
+    master_flavor:
+        type: string
+        label: Flavor for K8s master nodes
+        description: K8s master node(s) flavor
+        default: sepp-k8-master
+        constraints:
+            - custom_constraint: nova.flavor 
+    flavor:
+        type: string
+        label: Flavor for K8s worker nodes
+        description: K8s worker node(s) flavor
+        default: sepp-occne-k8-worker
+        constraints:
+            - custom_constraint: nova.flavor
+    public_network:
+        type: string
+        label: Network for allocating Floating IP to K8s Master node
+        default: ext-net2
+        description: Network for allocating Floating IP to K8s Master node
+        constraints:
+            - custom_constraint: neutron.network
+    tenant_network:
+        type: string
+        label: Internal Communication Network for all K8s nodes (should be tenant network)
+        default: sepp-tenant-network-1
+        description: Internal Communication Network for all K8s nodes (should be tenant network)
+        constraints:
+            - custom_constraint: neutron.network
+    sshkeypair:
+        label: SSH keypair name
+        type: string
+        default: occne-cluster-keys    
+    cluster_token:
+        type: string
+        label: Cluster token
+        description: Cluster token in format of <6 char>.<16 char>
+        default: varun.globallabs000001
+        constraints:
+            - allowed_pattern: ".{6}\\..{16}"
+              description: "<6 characters string>.<16 characters string>"
+    dashboard_token:
+        label: token used to log into kubernetes dashboard
+        type: string
+        default: "execute the following command on the master node: kubectl -n kube-system describe $(kubectl -n kube-system get secret -n kube-system -o name | grep namespace) | grep token:"
+resources:
+    master_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: {get_param: tenant_network}
+            port_security_enabled: false
+
+    slave1_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: {get_param: tenant_network}
+            port_security_enabled: false
+
+    slave2_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: {get_param: tenant_network}
+            port_security_enabled: false
+            
+    slave3_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: {get_param: tenant_network}
+            port_security_enabled: false
+            
+    slave4_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: {get_param: tenant_network}
+            port_security_enabled: false
+
+    slave5_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: {get_param: tenant_network}
+            port_security_enabled: false
+            
+    slave6_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: {get_param: tenant_network}
+            port_security_enabled: false
+
+    floating_ip:
+        type: OS::Neutron::FloatingIP
+        properties:
+          floating_network_id: { get_param: public_network }
+          port_id: { get_resource: master_port }
+
+    master:
+        type: OS::Nova::Server
+        depends_on:  [ master_port ]
+        properties:
+            key_name:
+                get_param: sshkeypair            
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'master']]
+            image: {get_param: image}
+            flavor: {get_param: master_flavor}
+            networks:
+                - port: { get_resource: master_port }
+            user_data_format: RAW
+            user_data:
+                str_replace:
+                    params:
+                        TOKEN: {get_param: cluster_token}
+                        MASTER_IP: {get_attr: [master_port, fixed_ips, 0, ip_address]}
+                        SLAVE1_IP: {get_attr: [slave1_port, fixed_ips, 0, ip_address]}
+                        SLAVE2_IP: {get_attr: [slave2_port, fixed_ips, 0, ip_address]}
+                        SLAVE3_IP: {get_attr: [slave3_port, fixed_ips, 0, ip_address]}
+                        SLAVE4_IP: {get_attr: [slave4_port, fixed_ips, 0, ip_address]}
+                        SLAVE5_IP: {get_attr: [slave5_port, fixed_ips, 0, ip_address]}
+                        SLAVE6_IP: {get_attr: [slave6_port, fixed_ips, 0, ip_address]}
+                    template: &masteruserdatatemplate |
+                        #cloud-config
+                        bootcmd:
+                            - echo "starting bootcmd module!"
+                            - setenforce 0
+                            - hostnamectl set-hostname master
+                            - sed -i'.orig' -e's/enforcing/permissive/' /etc/selinux/config
+                            - ip link set dev eth0 mtu 1500
+                            - echo "MTU=1500" >> /etc/sysconfig/network-scripts/ifcfg-eth0
+                            - rm -r /etc/yum.repos.d/public-yum-ol7.repo
+                            - sed -i'.orig' -e'/proxy/d' /etc/yum.conf
+                            - echo "proxy=http://www-some-proxy.com:80" >> /etc/yum.conf
+                            - grep -q -F "KUBECONFIG" /root/.bashrc || echo "export KUBECONFIG=/etc/kubernetes/admin.conf" >> /root/.bashrc
+                            - sed -i'.orig' -e'/manage_etc_hosts/d' /etc/cloud/cloud.cfg
+                            - echo "10.75.176.226 aws_instance.com" >> /etc/hosts
+                            - echo "10.75.215.74 varun-docker-registry.aws_instance.com" >> /etc/hosts
+                            - echo "workaround to fix DNS in IDC1 cloud!"
+                            - sed -i'.orig' -e'/nameserver/d' /etc/resolv.conf
+                            - echo "nameserver 10.75.30.40" >> /etc/resolv.conf
+                            - echo "bootcmd completed!"
+                        write_files:
+                            - path: /etc/systemd/system/docker.service.d/http-proxy.conf
+                              owner: root:root
+                              permissions: '0444'
+                              content: |
+                                  [Service] 
+                                  Environment="HTTP_PROXY=http://www-some-proxy.com:80" "HTTPS_PROXY=http://www-some-proxy.com:80" "NO_PROXY=localhost,127.0.0.1,aws_instance.com,MASTER_IP,master,SLAVE1_IP,slave1,SLAVE2_IP,slave2,SLAVE3_IP,slave3,SLAVE4_IP,slave4,SLAVE5_IP,slave5,SLAVE6_IP,slave6,10.244.0.0/16,10.96.0.0/12,varun-docker-registry.aws_instance.com"
+                            - path: /etc/profile.d/proxy.sh
+                              owner: root:root
+                              permissions: '0777'
+                              content: |
+                                  export http_proxy=http://www-some-proxy.com:80
+                                  export https_proxy=http://www-some-proxy.com:80
+                                  export HTTP_PROXY=http://www-some-proxy.com:80
+                                  export HTTPS_PROXY=http://www-some-proxy.com:80
+                                  export no_proxy=localhost,127.0.0.1,aws_instance.com,MASTER_IP,SLAVE1_IP,SLAVE2_IP,SLAVE3_IP,SLAVE4_IP,master,slave1,slave2,slave3,slave4,10.244.0.0/16,10.96.0.0/12,varun-docker-registry.aws_instance.com
+                                  export NO_PROXY=$no_proxy
+                            - path: /etc/sysctl.d/k8s.conf
+                              owner: root:root
+                              permissions: '0644'
+                              content: |
+                                  net.bridge.bridge-nf-call-ip6tables = 0
+                                  net.bridge.bridge-nf-call-iptables = 1
+                            - path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+                              owner: root:root
+                              permissions: '0644'
+                              content: |
+                                  # Note: This dropin only works with kubeadm and kubelet v1.11+
+                                  [Service]
+                                  Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
+                                  Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
+                                  Environment="KUBELET_CGROUP_ARGS=--cgroup-driver=cgroupfs"
+                                  # This is a file that "kubeadm init" and "kubeadm join" generates at runtime, populating the KUBELET_KUBEADM_ARGS variable dynamically
+                                  EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
+                                  # This is a file that the user can use for overrides of the kubelet args as a last resort. Preferably, the user should use
+                                  # the .NodeRegistration.KubeletExtraArgs object in the configuration files instead. KUBELET_EXTRA_ARGS should be sourced from this file.
+                                  EnvironmentFile=-/etc/sysconfig/kubelet
+                                  ExecStart=
+                                  ExecStart=/usr/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_CGROUP_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS
+                            - path: /etc/docker/daemon.json
+                              owner: root:root
+                              permissions: '0644'
+                              content: |
+                                  {
+                                  "insecure-registries" : ["varun-docker-registry.aws_instance.com:5000"]
+                                  }
+                        yum_repos:
+                            ol7_latest:
+                                name: Oracle Linux $releasever Latest ($basearch)
+                                baseurl: http://deployer-repo.us.oracle.com/repo/OracleLinux/OL7/ol7_latest/
+                                gpgkey: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-oracle
+                                gpgcheck: true
+                                enabled: true
+                                proxy: _none_
+                            ol7_addons:
+                                name: Oracle Linux $releasever Add ons ($basearch)
+                                baseurl: http://deployer-repo.us.oracle.com/repo/OracleLinux/OL7/ol7_addons
+                                gpgkey: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-oracle
+                                gpgcheck: true
+                                enabled: true
+                                proxy: _none_
+                            ol7_preview:
+                                name: Oracle Linux $releasever Preview ($basearch)
+                                baseurl: http://deployer-repo.us.oracle.com/repo/OracleLinux/OL7/ol7_preview
+                                gpgkey: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-oracle
+                                gpgcheck: true
+                                enabled: true
+                                proxy: _none_
+                            kubernetes:
+                                name: Kubernetes
+                                baseurl: http://deployer-repo.us.oracle.com/repo/OracleLinux/OL7/kubernetes
+                                enabled: true
+                                gpgcheck: false
+                                proxy: _none_
+                        packages:
+                            - vim
+                            - git
+                            - kubeadm-1.20.0
+                            - kubectl-1.20.0
+                            - kubelet-1.20.0
+                            - docker-engine
+                        runcmd:
+                            - echo "starting runcmd!"
+                            - echo "applying workaround for openstack bug 1747496"
+                            - setenforce 0
+                            - sed -i'.orig' -e's/enforcing/permissive/' /etc/selinux/config
+                            - ip link set dev eth0 mtu 1500
+                            - hostnamectl set-hostname master
+                            - echo "MTU=1500" >> /etc/sysconfig/network-scripts/ifcfg-eth0
+                            - sed -i'.orig' -e's/without-password/yes/' /etc/ssh/sshd_config
+                            - systemctl stop firewalld
+                            - systemctl mask firewalld
+                            - swapoff -a
+                            - echo "writing bridge-nf-call-iptables!"
+                            - echo '1' > /proc/sys/net/bridge/bridge-nf-call-iptables
+                            - sysctl --system
+                            - systemctl daemon-reload
+                            - systemctl enable docker
+                            - systemctl start docker
+                            - echo "starting kubernetes configuration!"
+                            - rm -rf /etc/kubernetes /etc/cni
+                            - MASTER_HOSTNAME=$(echo "master" | tr '_ ' '-')
+                            - SLAVE1_HOSTNAME=$(echo "slave1" | tr '_ ' '-')
+                            - SLAVE2_HOSTNAME=$(echo "slave2" | tr '_ ' '-')
+                            - SLAVE3_HOSTNAME=$(echo "slave3" | tr '_ ' '-')
+                            - SLAVE4_HOSTNAME=$(echo "slave4" | tr '_ ' '-')
+                            - SLAVE5_HOSTNAME=$(echo "slave5" | tr '_ ' '-')
+                            - SLAVE6_HOSTNAME=$(echo "slave6" | tr '_ ' '-')
+                            - echo "fixing /etc/hosts!"     
+                            - sed -i'.orig' -e'/master/d' /etc/hosts
+                            - sed -i'.orig' -e'/manage_etc_hosts/d' /etc/cloud/cloud.cfg
+                            - echo "MASTER_IP " $MASTER_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE1_IP " $SLAVE1_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE2_IP " $SLAVE2_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE3_IP " $SLAVE3_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE4_IP " $SLAVE4_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE5_IP " $SLAVE5_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE6_IP " $SLAVE6_HOSTNAME >> /etc/hosts
+                            - echo "10.75.176.226 aws_instance.com" >> /etc/hosts
+                            - echo "10.75.215.74 varun-docker-registry.aws_instance.com" >> /etc/hosts
+                            - echo "making double-sure proxy is set up!"
+                            - source /etc/profile.d/proxy.sh
+                            - echo "enable kubelet!"
+                            - systemctl enable kubelet
+                            - echo "starting kubernetes!"
+                            - export KUBECONFIG=/etc/kubernetes/admin.conf
+                            - kubeadm init --pod-network-cidr=10.244.0.0/16 --token=TOKEN --apiserver-advertise-address=MASTER_IP --kubernetes-version=1.20.0
+                            - echo "apply workaround for coredns security bug!"
+                            - kubectl patch --dry-run=false -n kube-system deployment/coredns -p  '{"spec":{"template":{"spec":{"containers":[{"securityContext":{"allowPrivilegeEscalation":true}, "name":"coredns"}]}}}}'
+                            - echo "installing flannel!"
+                            - docker pull quay.io/coreos/flannel:v0.10.0-amd64
+                            - kubectl apply -f http://deployer-repo.us.oracle.com/repo/k8s/k8sflannel.yaml
+                            #- echo "enabling SCTP!"
+                            #- sed -i '/    - kube-apiserver/a \    - --feature-gates=SCTPSupport=true'    /etc/kubernetes/manifests/kube-apiserver.yaml 
+                            - sleep 60
+                            - echo "creating the dashboard service!"
+                            - mkdir $HOME/certs
+                            - openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout dashboard.key -out dashboard.crt -subj '/C=US/ST=North Carolina/L=Raleigh/O=Oracle Corporation/CN=master'
+                            - kubectl create secret generic kubernetes-dashboard-certs --from-file=$HOME/certs -n kube-system
+                            - docker pull k8s.gcr.io/kubernetes-dashboard-amd64:v1.10.1
+                            - kubectl create -f https://raw.githubusercontent.com/kubernetes/dashboard/master/aio/deploy/recommended/kubernetes-dashboard.yaml
+                            - kubectl patch --dry-run=false -n kube-system svc/kubernetes-dashboard -p '{"spec":{"externalIPs":["MASTER_IP"]}}'
+                            - echo "apply workaround for coredns security bug!"
+                            - kubectl patch --dry-run=false -n kube-system deployment/coredns -p  '{"spec":{"template":{"spec":{"containers":[{"securityContext":{"allowPrivilegeEscalation":true}, "name":"coredns"}]}}}}'
+                            - sleep 60
+                            - echo "get the account token for the dashboard!"
+                            - ACCOUNT=`kubectl -n kube-system get secret -n kube-system -o name | grep namespace`
+                            - echo "ACCOUNT=" $ACCOUNT
+                            - DASH=`kubectl -n kube-system describe $ACCOUNT`
+                            - DASH=`echo $DASH | sed -e s/'^.*token\:'//g`
+                            - DASH=`echo $DASH | sed -e s/'ca.crt.*bytes'//g`
+                            - echo "token=" $DASH
+                            - echo "Installing Helm3...."
+                            - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+                            - chmod 700 get_helm.sh
+                            - ./get_helm.sh
+                            - helm version
+                            - echo "Helm3 is installed!"
+                            - cat /etc/docker/daemon.json
+                            - systemctl daemon-reload
+                            - systemctl restart docker.service
+                            - echo "runcmd complete!"
+                                             
+    slave1:
+        type: OS::Nova::Server
+        properties:
+            key_name:
+                get_param: sshkeypair
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'slave1']]
+            image: {get_param: image}
+            flavor: {get_param: flavor}
+            networks:
+                - port: {get_resource: slave1_port}
+            user_data_format: RAW
+            user_data:
+                str_replace:
+                    params:
+                        TOKEN: {get_param: cluster_token}
+                        NODE: "slave1"
+                        MASTER_IP: {get_attr: [master_port, fixed_ips, 0, ip_address]}
+                        SLAVE1_IP: {get_attr: [slave1_port, fixed_ips, 0, ip_address]}
+                        SLAVE2_IP: {get_attr: [slave2_port, fixed_ips, 0, ip_address]}
+                        SLAVE3_IP: {get_attr: [slave3_port, fixed_ips, 0, ip_address]}
+                        SLAVE4_IP: {get_attr: [slave4_port, fixed_ips, 0, ip_address]}
+                        SLAVE5_IP: {get_attr: [slave5_port, fixed_ips, 0, ip_address]}
+                        SLAVE6_IP: {get_attr: [slave6_port, fixed_ips, 0, ip_address]}
+                    template: &slaveuserdatatemplate |
+                        #cloud-config
+                        bootcmd:
+                            - echo "starting bootcmd module!"
+                            - setenforce 0
+                            - hostnamectl set-hostname NODE
+                            - rm -r /etc/yum.repos.d/public-yum-ol7.repo
+                            - sed -i'.orig' -e'/proxy/d' /etc/yum.conf
+                            - grep -q -F "KUBECONFIG" /root/.bashrc || echo "export KUBECONFIG=/etc/kubernetes/admin.conf" >> /root/.bashrc
+                            - sed -i'.orig' -e'/manage_etc_hosts/d' /etc/cloud/cloud.cfg
+                            - echo "10.75.176.226 aws_instance.com" >> /etc/hosts
+                            - echo "10.75.215.74 varun-docker-registry.aws_instance.com" >> /etc/hosts
+                            - echo "workaround to fix DNS in IDC1 cloud!"
+                            - sed -i'.orig' -e'/nameserver/d' /etc/resolv.conf
+                            - echo "nameserver 10.75.30.40" >> /etc/resolv.conf
+                            - echo "bootcmd completed!"
+                        write_files:
+                            - path: /etc/systemd/system/docker.service.d/http-proxy.conf
+                              owner: root:root
+                              permissions: '0444'
+                              content: |
+                                  [Service] 
+                                  Environment="HTTP_PROXY=http://www-some-proxy.com:80" "HTTPS_PROXY=http://www-some-proxy.com:80" "NO_PROXY=localhost,127.0.0.1,aws_instance.com,MASTER_IP,master,SLAVE1_IP,slave1,SLAVE2_IP,slave2,SLAVE3_IP,slave3,SLAVE4_IP,slave4,SLAVE5_IP,slave5,SLAVE6_IP,slave6,10.244.0.0/16,10.96.0.0/12,varun-docker-registry.aws_instance.com"
+                            - path: /etc/profile.d/proxy.sh
+                              owner: root:root
+                              permissions: '0777'
+                              content: |
+                                  export http_proxy=http://www-some-proxy.com:80
+                                  export https_proxy=http://www-some-proxy.com:80
+                                  export HTTP_PROXY=http://www-some-proxy.com:80
+                                  export HTTPS_PROXY=http://www-some-proxy.com:80
+                                  export no_proxy=localhost,127.0.0.1,aws_instance.com,MASTER_IP,SLAVE1_IP,SLAVE2_IP,SLAVE3_IP,SLAVE4_IP,master,slave1,slave2,slave3,slave4,10.244.0.0/16,10.96.0.0/12,varun-docker-registry.aws_instance.com
+                                  export NO_PROXY=$no_proxy
+                            - path: /etc/sysctl.d/k8s.conf
+                              owner: root:root
+                              permissions: '0644'
+                              content: |
+                                  net.bridge.bridge-nf-call-ip6tables = 0
+                                  net.bridge.bridge-nf-call-iptables = 1
+                            - path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+                              owner: root:root
+                              permissions: '0644'
+                              content: |
+                                  # Note: This dropin only works with kubeadm and kubelet v1.11+
+                                  [Service]
+                                  Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
+                                  Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
+                                  Environment="KUBELET_CGROUP_ARGS=--cgroup-driver=cgroupfs"
+                                  # This is a file that "kubeadm init" and "kubeadm join" generates at runtime, populating the KUBELET_KUBEADM_ARGS variable dynamically
+                                  EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
+                                  # This is a file that the user can use for overrides of the kubelet args as a last resort. Preferably, the user should use
+                                  # the .NodeRegistration.KubeletExtraArgs object in the configuration files instead. KUBELET_EXTRA_ARGS should be sourced from this file.
+                                  EnvironmentFile=-/etc/sysconfig/kubelet
+                                  ExecStart=
+                                  ExecStart=/usr/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_CGROUP_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS
+                            - path: /etc/docker/daemon.json
+                              owner: root:root
+                              permissions: '0644'
+                              content: |
+                                  {
+                                  "insecure-registries" : ["varun-docker-registry.aws_instance.com:5000"]
+                                  }
+                        yum_repos:
+                            ol7_latest:
+                                name: Oracle Linux $releasever Latest ($basearch)
+                                baseurl: http://deployer-repo.us.oracle.com/repo/OracleLinux/OL7/ol7_latest/
+                                gpgkey: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-oracle
+                                gpgcheck: true
+                                enabled: true
+                                proxy: _none_
+                            ol7_addons:
+                                name: Oracle Linux $releasever Add ons ($basearch)
+                                baseurl: http://deployer-repo.us.oracle.com/repo/OracleLinux/OL7/ol7_addons
+                                gpgkey: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-oracle
+                                gpgcheck: true
+                                enabled: true
+                                proxy: _none_
+                            ol7_preview:
+                                name: Oracle Linux $releasever Preview ($basearch)
+                                baseurl: http://deployer-repo.us.oracle.com/repo/OracleLinux/OL7/ol7_preview
+                                gpgkey: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-oracle
+                                gpgcheck: true
+                                enabled: true
+                                proxy: _none_
+                            kubernetes:
+                                name: Kubernetes
+                                baseurl: http://deployer-repo.us.oracle.com/repo/OracleLinux/OL7/kubernetes
+                                enabled: true
+                                gpgcheck: false
+                                proxy: _none_
+                        packages:
+                            - vim
+                            - git
+                            - kubeadm-1.20.0
+                            - kubectl-1.20.0
+                            - kubelet
+                            - docker-engine
+                        runcmd:
+                            - echo "starting runcmd!"
+                            - echo "applying workaround for openstack bug 1747496"
+                            - setenforce 0
+                            - sed -i'.orig' -e's/enforcing/permissive/' /etc/selinux/config
+                            - ip link set dev eth0 mtu 1500
+                            - echo "MTU=1500" >> /etc/sysconfig/network-scripts/ifcfg-eth0
+                            - hostnamectl set-hostname NODE
+                            - MASTER_HOSTNAME=$(echo "master" | tr '_ ' '-')
+                            - SLAVE1_HOSTNAME=$(echo "slave1" | tr '_ ' '-')
+                            - SLAVE2_HOSTNAME=$(echo "slave2" | tr '_ ' '-')
+                            - SLAVE3_HOSTNAME=$(echo "slave3" | tr '_ ' '-')
+                            - SLAVE4_HOSTNAME=$(echo "slave4" | tr '_ ' '-')
+                            - SLAVE5_HOSTNAME=$(echo "slave5" | tr '_ ' '-')
+                            - SLAVE6_HOSTNAME=$(echo "slave6" | tr '_ ' '-')
+                            - echo "fixing /etc/hosts!"
+                            - sed -i'.orig' -e'/manage_etc_hosts/d' /etc/cloud/cloud.cfg
+                            - sed -i'.orig' -e'/slave/d' /etc/hosts
+                            - echo "MASTER_IP " $MASTER_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE1_IP " $SLAVE1_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE2_IP " $SLAVE2_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE3_IP " $SLAVE3_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE4_IP " $SLAVE4_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE5_IP " $SLAVE5_HOSTNAME >> /etc/hosts
+                            - echo "SLAVE6_IP " $SLAVE6_HOSTNAME >> /etc/hosts
+                            - echo "10.75.176.226 aws_instance.com" >> /etc/hosts
+                            - echo "10.75.215.74 varun-docker-registry.aws_instance.com" >> /etc/hosts
+                            - echo "making double-sure proxy is set up!"
+                            - source /etc/profile.d/proxy.sh
+                            - sed -i'.orig' -e's/without-password/yes/' /etc/ssh/sshd_config
+                            - systemctl stop firewalld
+                            - systemctl mask firewalld
+                            - swapoff -a
+                            - echo '1' > /proc/sys/net/bridge/bridge-nf-call-iptables
+                            - sysctl --system
+                            - systemctl daemon-reload
+                            - systemctl enable docker
+                            - systemctl start docker
+                            - echo "pre-pulling flannel container"
+                            - docker pull quay.io/coreos/flannel:v0.13.0-amd64
+                            - echo "pre-pulling dashboard container"
+                            - docker pull k8s.gcr.io/kubernetes-dashboard-amd64:v2.0.4
+                            - echo "enable kubelet!"
+                            - systemctl enable kubelet
+                            - echo "attempting to join kubernetes cluster!"
+                            - while ! curl -k https://MASTER_IP:6443/version; do echo "Master not ready. Waiting"; date; sleep 10; done
+                            - sleep 120
+                            - rm -rf /etc/kubernetes
+                            - kubeadm join MASTER_IP:6443 --token=TOKEN --discovery-token-unsafe-skip-ca-verification
+                            - mkdir /etc/kubernetes/manifests
+                            - cat /etc/docker/daemon.json
+                            - systemctl daemon-reload
+                            - systemctl restart docker.service
+                            - echo "runcmd complete!"
+
+    slave2:
+        type: OS::Nova::Server
+        properties:
+            key_name:
+                get_param: sshkeypair
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'slave2']]
+            image: {get_param: image}
+            flavor: {get_param: flavor}
+            networks:
+                - port: {get_resource: slave2_port}
+            user_data_format: RAW
+            user_data:
+                str_replace:
+                    template: *slaveuserdatatemplate
+                    params:
+                        TOKEN: {get_param: cluster_token}
+                        NODE: "slave2"
+                        MASTER_IP: {get_attr: [master_port, fixed_ips, 0, ip_address]}
+                        SLAVE1_IP: {get_attr: [slave1_port, fixed_ips, 0, ip_address]}
+                        SLAVE2_IP: {get_attr: [slave2_port, fixed_ips, 0, ip_address]}
+                        SLAVE3_IP: {get_attr: [slave3_port, fixed_ips, 0, ip_address]}
+                        SLAVE4_IP: {get_attr: [slave4_port, fixed_ips, 0, ip_address]}
+                        SLAVE5_IP: {get_attr: [slave5_port, fixed_ips, 0, ip_address]}
+                        SLAVE6_IP: {get_attr: [slave6_port, fixed_ips, 0, ip_address]}
+                        
+    slave3:
+        type: OS::Nova::Server
+        properties:
+            key_name:
+                get_param: sshkeypair
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'slave3']]
+            image: {get_param: image}
+            flavor: {get_param: flavor}
+            networks:
+                - port: {get_resource: slave3_port}
+            user_data_format: RAW
+            user_data:
+                str_replace:
+                    template: *slaveuserdatatemplate
+                    params:
+                        TOKEN: {get_param: cluster_token}
+                        NODE: "slave3"
+                        MASTER_IP: {get_attr: [master_port, fixed_ips, 0, ip_address]}
+                        SLAVE1_IP: {get_attr: [slave1_port, fixed_ips, 0, ip_address]}
+                        SLAVE2_IP: {get_attr: [slave2_port, fixed_ips, 0, ip_address]}
+                        SLAVE3_IP: {get_attr: [slave3_port, fixed_ips, 0, ip_address]}
+                        SLAVE4_IP: {get_attr: [slave4_port, fixed_ips, 0, ip_address]}
+                        SLAVE5_IP: {get_attr: [slave5_port, fixed_ips, 0, ip_address]}
+                        SLAVE6_IP: {get_attr: [slave6_port, fixed_ips, 0, ip_address]}
+                        
+    slave4:
+        type: OS::Nova::Server
+        properties:
+            key_name:
+                get_param: sshkeypair
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'slave4']]
+            image: {get_param: image}
+            flavor: {get_param: flavor}
+            networks:
+                - port: {get_resource: slave4_port}
+            user_data_format: RAW
+            user_data:
+                str_replace:
+                    template: *slaveuserdatatemplate
+                    params:
+                        TOKEN: {get_param: cluster_token}
+                        NODE: "slave4"
+                        MASTER_IP: {get_attr: [master_port, fixed_ips, 0, ip_address]}
+                        SLAVE1_IP: {get_attr: [slave1_port, fixed_ips, 0, ip_address]}
+                        SLAVE2_IP: {get_attr: [slave2_port, fixed_ips, 0, ip_address]}
+                        SLAVE3_IP: {get_attr: [slave3_port, fixed_ips, 0, ip_address]}
+                        SLAVE4_IP: {get_attr: [slave4_port, fixed_ips, 0, ip_address]}   
+                        SLAVE5_IP: {get_attr: [slave5_port, fixed_ips, 0, ip_address]}
+                        SLAVE6_IP: {get_attr: [slave6_port, fixed_ips, 0, ip_address]} 
+                    
+    slave5:
+        type: OS::Nova::Server
+        properties:
+            key_name:
+                get_param: sshkeypair
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'slave5']]
+            image: {get_param: image}
+            flavor: {get_param: flavor}
+            networks:
+                - port: {get_resource: slave5_port}
+            user_data_format: RAW
+            user_data:
+                str_replace:
+                    template: *slaveuserdatatemplate
+                    params:
+                        TOKEN: {get_param: cluster_token}
+                        NODE: "slave5"
+                        MASTER_IP: {get_attr: [master_port, fixed_ips, 0, ip_address]}
+                        SLAVE1_IP: {get_attr: [slave1_port, fixed_ips, 0, ip_address]}
+                        SLAVE2_IP: {get_attr: [slave2_port, fixed_ips, 0, ip_address]}
+                        SLAVE3_IP: {get_attr: [slave3_port, fixed_ips, 0, ip_address]}
+                        SLAVE4_IP: {get_attr: [slave4_port, fixed_ips, 0, ip_address]}
+                        SLAVE5_IP: {get_attr: [slave5_port, fixed_ips, 0, ip_address]}
+                        SLAVE6_IP: {get_attr: [slave6_port, fixed_ips, 0, ip_address]}
+                        
+    slave6:
+        type: OS::Nova::Server
+        properties:
+            key_name:
+                get_param: sshkeypair
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'slave6']]
+            image: {get_param: image}
+            flavor: {get_param: flavor}
+            networks:
+                - port: {get_resource: slave6_port}
+            user_data_format: RAW
+            user_data:
+                str_replace:
+                    template: *slaveuserdatatemplate
+                    params:
+                        TOKEN: {get_param: cluster_token}
+                        NODE: "slave6"
+                        MASTER_IP: {get_attr: [master_port, fixed_ips, 0, ip_address]}
+                        SLAVE1_IP: {get_attr: [slave1_port, fixed_ips, 0, ip_address]}
+                        SLAVE2_IP: {get_attr: [slave2_port, fixed_ips, 0, ip_address]}
+                        SLAVE3_IP: {get_attr: [slave3_port, fixed_ips, 0, ip_address]}
+                        SLAVE4_IP: {get_attr: [slave4_port, fixed_ips, 0, ip_address]}   
+                        SLAVE5_IP: {get_attr: [slave5_port, fixed_ips, 0, ip_address]}
+                        SLAVE6_IP: {get_attr: [slave6_port, fixed_ips, 0, ip_address]} 
+
+outputs:
+    master_ip:
+        description: IP Address of the master
+        value: {get_attr: [master, first_address]}
+    slave1_ip:
+        description: IP address of slave1
+        value: {get_attr: [slave1, first_address]}
+    slave2_ip:
+        description: IP address of slave2
+        value: {get_attr: [slave2, first_address]}
+    slave3_ip:
+        description: IP address of slave3
+        value: {get_attr: [slave3, first_address]}
+    slave4_ip:
+        description: IP address of slave4
+        value: {get_attr: [slave4, first_address]}
+    slave5_ip:
+        description: IP address of slave5
+        value: {get_attr: [slave5, first_address]}
+    slave6_ip:
+        description: IP address of slave6
+        value: {get_attr: [slave6, first_address]}
+    kubernetes_gui: 
+        description: URL to access the kubernetes graphical dashboard
+        value: {list_join: ["", ["https://", get_attr: [slave1, first_address], "/#!/login"]]}
+    dashboard_token:
+        description: token used to log into kubernetes dashboard
+        value: {get_param: dashboard_token}
+

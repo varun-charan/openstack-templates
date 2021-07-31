@@ -1,0 +1,51 @@
+heat_template_version: 2018-08-31
+description: A template used to create a new tenant network and router for SEPP
+parameters:
+    user_identifier:
+        type: string
+        label: An identifier that'll be used to create resources (for e.g., first name, feature name, etc.)
+        description: An identifier that'll be used to create resources (for e.g., first name, feature name, etc.)
+    tenant_subnet_cidr:
+        type: string
+        label: Subnet CIDR for new tenant subnet (like 192.168.x.x/yy)
+        description: Subnet CIDR for new tenant subnet (like 192.168.x.x/yy)
+        default: 192.168.19.0/27
+    external_network:
+        type: string
+        label: External network for SEPP Router (should be desktop-routable)
+        default: ext-net2
+        description: External network for SEPP Router (should be desktop-routable)
+        constraints:
+            - custom_constraint: neutron.network
+resources:
+    tenant_network:
+        type: OS::Neutron::Net
+        properties:
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'tenant-network']]
+  
+    tenant_subnet:
+        type: OS::Neutron::Subnet
+        depends_on: tenant_network
+        properties:
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'tenant-subnet']]
+            network_id: { get_resource: tenant_network }
+            cidr: { get_param: tenant_subnet_cidr }
+            ip_version: 4
+            enable_dhcp: true
+  
+    tenant_router:
+        type: OS::Neutron::Router
+        properties:
+            name:
+                list_join: ['-', [ {get_param: user_identifier}, 'tenant-router']]
+            external_gateway_info:
+                network: { get_param: external_network }
+
+    tenant_router_interface:
+        type: OS::Neutron::RouterInterface
+        depends_on: [ tenant_router, tenant_subnet ]
+        properties:
+            router: { get_resource: tenant_router } 
+            subnet: { get_resource: tenant_subnet }
